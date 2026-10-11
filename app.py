@@ -1,7 +1,6 @@
 """
-Inventario de Aulas - Versión Web con login y roles
+Inventario de Aulas - Versión Web con login, roles y Supabase
 """
-import sqlite3
 from datetime import datetime
 
 import pandas as pd
@@ -9,10 +8,9 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
+from supabase import create_client, Client
 
 # ---------- CONFIGURACIÓN ----------
-DB_NAME = "inventario_aulas.db"
-
 st.set_page_config(
     page_title="Inventario de Aulas",
     page_icon="🏫",
@@ -27,17 +25,23 @@ TIPOS = ["Ordenador", "Portátil", "Proyector", "Pizarra digital",
 ESTADOS = ["Operativo", "Averiado", "En reparación", "Obsoleto", "Baja"]
 
 
+# ---------- SUPABASE ----------
+@st.cache_resource
+def get_supabase() -> Client:
+    """Crea el cliente de Supabase (cacheado)."""
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+
 # ---------- LOGIN ----------
 def cargar_config_auth():
     """Carga la config desde secrets (nube) o desde auth.yaml (local)."""
-    # 1) Intentar leer de st.secrets (Streamlit Cloud)
     try:
         if "auth" in st.secrets:
             return st.secrets["auth"].to_dict()
     except Exception:
         pass
-
-    # 2) Si no, leer del archivo local
     try:
         with open("auth.yaml", encoding="utf-8") as f:
             return yaml.load(f, Loader=SafeLoader)
@@ -67,106 +71,90 @@ def es_admin():
     return "admin" in roles
 
 
-# ---------- BASE DE DATOS ----------
-def get_con():
-    con = sqlite3.connect(DB_NAME)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
-    return con
-
-
-def init_db():
-    con = get_con()
-    cur = con.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS aulas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT UNIQUE NOT NULL,
-            ubicacion TEXT
-        )""")
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS equipos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            aula_id INTEGER NOT NULL,
-            tipo TEXT NOT NULL,
-            marca TEXT, modelo TEXT, num_serie TEXT,
-            estado TEXT, fecha_instalacion TEXT, notas TEXT,
-            FOREIGN KEY (aula_id) REFERENCES aulas(id) ON DELETE CASCADE
-        )""")
-    con.commit()
-    con.close()
-
-
-@st.cache_data(ttl=5)
+# ---------- ACCESO A DATOS ----------
+@st.cache_data(ttl=30)
 def listar_aulas():
-    con = get_con()
-    df = pd.read_sql_query(
-        "SELECT id, nombre, ubicacion FROM aulas ORDER BY ubicacion, nombre", con)
-    con.close()
-    return df
+    """Devuelve todas las aulas ordenadas por ubicación y nombre."""
+    sb = get_supabase()
+    resp = sb.table("aulas").select("id, nombre, ubicacion").order(
+        "ubicacion").order("nombre").execute()
+    return pd.DataFrame(resp.data)
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)
 def listar_equipos(aula_id):
-    con = get_con()
-    df = pd.read_sql_query("""
-        SELECT id, tipo, marca, modelo, num_serie, estado,
-               fecha_instalacion, notas
-        FROM equipos WHERE aula_id=? ORDER BY tipo
-    """, con, params=(aula_id,))
-    con.close()
-    return df
+    """Devuelve los equipos de un aula."""
+    sb = get_supabase()
+    resp = (sb.table("equipos")
+              .select("id, tipo, marca, modelo, num_serie, estado, "
+                      "fecha_instalacion, notas")
+              .eq("aula_id", aula_id)
+              .order("tipo")
+              .execute())
+    return pd.DataFrame(resp.data)
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=30)
 def estadisticas_globales():
-    con = get_con()
-    total_aulas = con.execute("SELECT COUNT(*) FROM aulas").fetchone()[0]
-    total_equipos = con.execute("SELECT COUNT(*) FROM equipos").fetchone()[0]
-    por_estado = pd.read_sql_query(
-        "SELECT estado, COUNT(*) as n FROM equipos GROUP BY estado", con)
-    por_tipo = pd.read_sql_query(
-        "SELECT tipo, COUNT(*) as n FROM equipos GROUP BY tipo ORDER BY n DESC", con)
-    con.close()
+    """Estadísticas globales del inventario."""
+    sb = get_supabase()
+    aulas = sb.table("aulas").select("id", count="exact").execute()
+    equipos = sb.table("equipos").select("id, estado, tipo").execute()
+
+    total_aulas = aulas.count or 0
+    df_equipos = pd.DataFrame(equipos.data)
+    total_equipos = len(df_equipos)
+
+    if df_equipos.empty:
+        por_estado = pd.DataFrame(columns=["estado", "n"])
+        por_tipo = pd.DataFrame(columns=["tipo", "n"])
+    else:
+        por_estado = (df_equipos.groupby("estado").size()
+                      .reset_index(name="n"))
+        por_tipo = (df_equipos.groupby("tipo").size()
+                    .reset_index(name="n")
+                    .sort_values("n", ascending=False))
+
     return total_aulas, total_equipos, por_estado, por_tipo
 
 
 def insertar_equipo(aula_id, datos):
-    con = get_con()
-    con.execute("""
-        INSERT INTO equipos (aula_id, tipo, marca, modelo, num_serie,
-                             estado, fecha_instalacion, notas)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (aula_id, *datos))
-    con.commit()
-    con.close()
+    sb = get_supabase()
+    sb.table("equipos").insert({
+        "aula_id": aula_id,
+        "tipo": datos[0],
+        "marca": datos[1],
+        "modelo": datos[2],
+        "num_serie": datos[3],
+        "estado": datos[4],
+        "fecha_instalacion": datos[5],
+        "notas": datos[6],
+    }).execute()
     st.cache_data.clear()
 
 
 def actualizar_equipo(equipo_id, datos):
-    con = get_con()
-    con.execute("""
-        UPDATE equipos SET tipo=?, marca=?, modelo=?, num_serie=?,
-               estado=?, fecha_instalacion=?, notas=?
-        WHERE id=?
-    """, (*datos, equipo_id))
-    con.commit()
-    con.close()
+    sb = get_supabase()
+    sb.table("equipos").update({
+        "tipo": datos[0],
+        "marca": datos[1],
+        "modelo": datos[2],
+        "num_serie": datos[3],
+        "estado": datos[4],
+        "fecha_instalacion": datos[5],
+        "notas": datos[6],
+    }).eq("id", equipo_id).execute()
     st.cache_data.clear()
 
 
 def eliminar_equipo(equipo_id):
-    con = get_con()
-    con.execute("DELETE FROM equipos WHERE id=?", (equipo_id,))
-    con.commit()
-    con.close()
+    sb = get_supabase()
+    sb.table("equipos").delete().eq("id", equipo_id).execute()
     st.cache_data.clear()
 
 
 # ---------- INTERFAZ ----------
 def main():
-    init_db()
-
     # --- LOGIN ---
     authenticator = inicializar_autenticador()
     authenticator.login(location="main")
@@ -375,11 +363,13 @@ def main():
         with col_a:
             st.write("**Equipos por estado**")
             st.dataframe(por_estado, use_container_width=True, hide_index=True)
-            st.bar_chart(por_estado.set_index("estado")["n"])
+            if not por_estado.empty:
+                st.bar_chart(por_estado.set_index("estado")["n"])
         with col_b:
             st.write("**Equipos por tipo**")
             st.dataframe(por_tipo, use_container_width=True, hide_index=True)
-            st.bar_chart(por_tipo.set_index("tipo")["n"])
+            if not por_tipo.empty:
+                st.bar_chart(por_tipo.set_index("tipo")["n"])
 
 
 if __name__ == "__main__":

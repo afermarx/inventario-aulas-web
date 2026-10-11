@@ -1,4 +1,5 @@
 streamlit>=1.30
 pandas>=2.0
-streamlit-authenticator>=0.3.2
+streamlit-authenticator>=0.4.0
 pyyaml>=6.0
+supabase>=2.0
