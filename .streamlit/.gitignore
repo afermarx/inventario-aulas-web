@@ -3,3 +3,5 @@ __pycache__/
 .vscode/
 .idea/
 .streamlit/secrets.toml
+auth.yaml
+generar_hash.py

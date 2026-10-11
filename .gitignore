@@ -1,0 +1,8 @@
+__pycache__/ 
+*.pyc 
+auth.yaml 
+generar_hash.py 
+generar_hash1.py 
+.vscode/ 
+.idea/ 
+.DS_Store 

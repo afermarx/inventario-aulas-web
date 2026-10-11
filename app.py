@@ -1,13 +1,14 @@
-﻿"""
-Inventario de Aulas - Versión Web (Streamlit)
-Reutiliza la base de datos SQLite del programa de escritorio.
+"""
+Inventario de Aulas - Versión Web con login y roles
 """
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit_authenticator as stauth
+import yaml
+from yaml.loader import SafeLoader
 
 # ---------- CONFIGURACIÓN ----------
 DB_NAME = "inventario_aulas.db"
@@ -24,6 +25,34 @@ TIPOS = ["Ordenador", "Portátil", "Proyector", "Pizarra digital",
          "Cámara", "Teclado", "Ratón", "CPU", "Protector de tensión", "Otro"]
 
 ESTADOS = ["Operativo", "Averiado", "En reparación", "Obsoleto", "Baja"]
+
+
+# ---------- LOGIN ----------
+def cargar_config_auth():
+    """Carga la config desde secrets (nube) o desde auth.yaml (local)."""
+    try:
+        if "auth" in st.secrets:
+            return dict(st.secrets["auth"])
+    except Exception:
+        pass
+    with open("auth.yaml", encoding="utf-8") as f:
+        return yaml.load(f, Loader=SafeLoader)
+
+
+def inicializar_autenticador():
+    config = cargar_config_auth()
+    authenticator = stauth.Authenticate(
+        config["credentials"],
+        config["cookie"]["name"],
+        config["cookie"]["key"],
+        config["cookie"]["expiry_days"],
+    )
+    return authenticator
+
+
+def es_admin():
+    roles = st.session_state.get("roles") or []
+    return "admin" in roles
 
 
 # ---------- BASE DE DATOS ----------
@@ -60,8 +89,7 @@ def init_db():
 def listar_aulas():
     con = get_con()
     df = pd.read_sql_query(
-        "SELECT id, nombre, ubicacion FROM aulas ORDER BY ubicacion, nombre",
-        con)
+        "SELECT id, nombre, ubicacion FROM aulas ORDER BY ubicacion, nombre", con)
     con.close()
     return df
 
@@ -127,18 +155,43 @@ def eliminar_equipo(equipo_id):
 def main():
     init_db()
 
-    st.title("🏫 Inventario de Equipos por Aula")
+    # --- LOGIN ---
+    authenticator = inicializar_autenticador()
+    authenticator.login(location="main")
 
-    # --- Barra lateral: selección de aula
+    auth_status = st.session_state.get("authentication_status")
+
+    if auth_status is False:
+        st.error("❌ Usuario o contraseña incorrectos.")
+        st.stop()
+
+    if auth_status is None:
+        st.warning("🔒 Introduce tus credenciales para acceder.")
+        st.info("Si no tienes cuenta, contacta con el administrador TIC del centro.")
+        st.stop()
+
+    # --- USUARIO AUTENTICADO ---
+    usuario_nombre = st.session_state.get("name") or st.session_state.get("username")
+    usuario_rol = "admin" if es_admin() else "viewer"
+
+    col_info, col_logout = st.columns([4, 1])
+    with col_info:
+        st.markdown("### 🏫 Inventario de Equipos por Aula")
+        emoji = "👑" if usuario_rol == "admin" else "👤"
+        st.caption(f"{emoji} Conectado como **{usuario_nombre}** · Rol: `{usuario_rol}`")
+    with col_logout:
+        authenticator.logout("Cerrar sesión", location="main")
+
+    st.divider()
+
+    # --- Barra lateral ---
     with st.sidebar:
         st.header("📚 Aulas")
         aulas = listar_aulas()
         if aulas.empty:
-            st.warning("No hay aulas en la base de datos.\n\n"
-                       "Importa el CSV con `python importar_csv.py`.")
+            st.warning("No hay aulas en la base de datos.")
             st.stop()
 
-        # Agrupar por ubicación
         opciones = []
         for _, row in aulas.iterrows():
             etiqueta = f"{row['nombre']}  ({row['ubicacion'] or 'sin planta'})"
@@ -153,28 +206,31 @@ def main():
         aula_nombre = seleccion.split("  (")[0]
 
         st.divider()
-        st.caption(f"Base de datos: `{DB_NAME}`")
         if st.button("🔄 Refrescar datos", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
-    # --- Tabs principales
-    tab_inv, tab_add, tab_stats = st.tabs(
-        ["📋 Inventario del aula", "➕ Añadir equipo", "📊 Estadísticas"]
-    )
+    # --- Pestañas según el rol ---
+    if usuario_rol == "admin":
+        tab_inv, tab_add, tab_stats = st.tabs(
+            ["📋 Inventario del aula", "➕ Añadir equipo", "📊 Estadísticas"]
+        )
+    else:
+        tab_inv, tab_stats = st.tabs(
+            ["📋 Inventario del aula", "📊 Estadísticas"]
+        )
+        tab_add = None
 
     # ============ TAB 1: INVENTARIO ============
     with tab_inv:
         st.subheader(f"Equipos en {aula_nombre}")
-
         equipos = listar_equipos(aula_id)
 
         if equipos.empty:
             st.info("Esta aula no tiene equipos registrados todavía.")
         else:
-            # Búsqueda
-            filtro = st.text_input("🔍 Buscar (tipo, marca, modelo, nº serie...)",
-                                    "").strip().lower()
+            filtro = st.text_input(
+                "🔍 Buscar (tipo, marca, modelo, nº serie...)", "").strip().lower()
 
             df_filtrado = equipos.copy()
             if filtro:
@@ -185,7 +241,6 @@ def main():
 
             st.caption(f"Mostrando {len(df_filtrado)} de {len(equipos)} equipos")
 
-            # Colores de estado
             def color_estado(val):
                 colores = {
                     "Operativo": "background-color: #d4edda",
@@ -200,19 +255,8 @@ def main():
                 df_filtrado.style.map(color_estado, subset=["estado"]),
                 use_container_width=True,
                 hide_index=True,
-                column_config={
-                    "id": st.column_config.NumberColumn("ID", width="small"),
-                    "tipo": st.column_config.TextColumn("Tipo", width="medium"),
-                    "marca": st.column_config.TextColumn("Marca", width="small"),
-                    "modelo": st.column_config.TextColumn("Modelo", width="medium"),
-                    "num_serie": st.column_config.TextColumn("Nº Serie", width="small"),
-                    "estado": st.column_config.TextColumn("Estado", width="small"),
-                    "fecha_instalacion": st.column_config.TextColumn("Instalación", width="small"),
-                    "notas": st.column_config.TextColumn("Notas", width="large"),
-                },
             )
 
-            # Exportar CSV
             csv = df_filtrado.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Exportar CSV",
@@ -221,77 +265,85 @@ def main():
                 mime="text/csv",
             )
 
-            # Editar / eliminar
-            st.divider()
-            st.subheader("✏️ Editar o eliminar equipo")
-            opciones_eq = {
-                f"#{r['id']} — {r['tipo']} {r['marca'] or ''} {r['modelo'] or ''}".strip():
-                r for _, r in equipos.iterrows()
-            }
-            sel_eq = st.selectbox("Selecciona un equipo:", list(opciones_eq.keys()))
-            equipo = opciones_eq[sel_eq]
+            if usuario_rol == "admin":
+                st.divider()
+                st.subheader("✏️ Editar o eliminar equipo")
+                opciones_eq = {
+                    f"#{r['id']} — {r['tipo']} {r['marca'] or ''} {r['modelo'] or ''}".strip():
+                    r for _, r in equipos.iterrows()
+                }
+                sel_eq = st.selectbox("Selecciona un equipo:",
+                                       list(opciones_eq.keys()))
+                equipo = opciones_eq[sel_eq]
 
-            with st.form("form_editar"):
+                with st.form("form_editar"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        tipo = st.selectbox("Tipo", TIPOS,
+                            index=TIPOS.index(equipo["tipo"])
+                            if equipo["tipo"] in TIPOS else 0)
+                        marca = st.text_input("Marca", equipo["marca"] or "")
+                        modelo = st.text_input("Modelo", equipo["modelo"] or "")
+                        num_serie = st.text_input("Nº de serie",
+                                                  equipo["num_serie"] or "")
+                    with col2:
+                        estado = st.selectbox("Estado", ESTADOS,
+                            index=ESTADOS.index(equipo["estado"])
+                            if equipo["estado"] in ESTADOS else 0)
+                        fecha = st.text_input("Fecha instalación (AAAA-MM-DD)",
+                                              equipo["fecha_instalacion"] or "")
+                        notas = st.text_area("Notas", equipo["notas"] or "")
+
+                    col_b1, col_b2 = st.columns([1, 1])
+                    with col_b1:
+                        guardar = st.form_submit_button("💾 Guardar cambios",
+                                                        use_container_width=True)
+                    with col_b2:
+                        borrar = st.form_submit_button("🗑️ Eliminar equipo",
+                                                       use_container_width=True)
+
+                    if guardar:
+                        actualizar_equipo(equipo["id"],
+                            (tipo, marca, modelo, num_serie, estado, fecha, notas))
+                        st.success("Equipo actualizado")
+                        st.rerun()
+
+                    if borrar:
+                        eliminar_equipo(equipo["id"])
+                        st.success("Equipo eliminado")
+                        st.rerun()
+            else:
+                st.info("👤 Modo solo lectura. Contacta con el administrador TIC "
+                        "para modificar equipos.")
+
+    # ============ TAB 2: AÑADIR EQUIPO (solo admin) ============
+    if tab_add is not None:
+        with tab_add:
+            st.subheader(f"Añadir equipo a {aula_nombre}")
+            with st.form("form_nuevo", clear_on_submit=True):
                 col1, col2 = st.columns(2)
                 with col1:
-                    tipo = st.selectbox("Tipo", TIPOS,
-                        index=TIPOS.index(equipo["tipo"]) if equipo["tipo"] in TIPOS else 0)
-                    marca = st.text_input("Marca", equipo["marca"] or "")
-                    modelo = st.text_input("Modelo", equipo["modelo"] or "")
-                    num_serie = st.text_input("Nº de serie", equipo["num_serie"] or "")
+                    tipo_n = st.selectbox("Tipo *", TIPOS)
+                    marca_n = st.text_input("Marca")
+                    modelo_n = st.text_input("Modelo")
+                    num_serie_n = st.text_input("Nº de serie")
                 with col2:
-                    estado = st.selectbox("Estado", ESTADOS,
-                        index=ESTADOS.index(equipo["estado"]) if equipo["estado"] in ESTADOS else 0)
-                    fecha = st.text_input("Fecha instalación (AAAA-MM-DD)",
-                                          equipo["fecha_instalacion"] or "")
-                    notas = st.text_area("Notas", equipo["notas"] or "")
+                    estado_n = st.selectbox("Estado", ESTADOS, index=0)
+                    fecha_n = st.text_input("Fecha instalación (AAAA-MM-DD)",
+                                            datetime.now().strftime("%Y-%m-%d"))
+                    notas_n = st.text_area("Notas")
 
-                col_b1, col_b2 = st.columns([1, 1])
-                with col_b1:
-                    guardar = st.form_submit_button("💾 Guardar cambios",
-                                                     use_container_width=True)
-                with col_b2:
-                    borrar = st.form_submit_button("🗑️ Eliminar equipo",
-                                                    use_container_width=True)
-
-                if guardar:
-                    actualizar_equipo(equipo["id"],
-                        (tipo, marca, modelo, num_serie, estado, fecha, notas))
-                    st.success("Equipo actualizado")
-                    st.rerun()
-
-                if borrar:
-                    eliminar_equipo(equipo["id"])
-                    st.success("Equipo eliminado")
-                    st.rerun()
-
-    # ============ TAB 2: AÑADIR EQUIPO ============
-    with tab_add:
-        st.subheader(f"Añadir equipo a {aula_nombre}")
-        with st.form("form_nuevo", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                tipo_n = st.selectbox("Tipo *", TIPOS)
-                marca_n = st.text_input("Marca")
-                modelo_n = st.text_input("Modelo")
-                num_serie_n = st.text_input("Nº de serie")
-            with col2:
-                estado_n = st.selectbox("Estado", ESTADOS, index=0)
-                fecha_n = st.text_input("Fecha instalación (AAAA-MM-DD)",
-                                        datetime.now().strftime("%Y-%m-%d"))
-                notas_n = st.text_area("Notas")
-
-            enviado = st.form_submit_button("➕ Añadir equipo",
-                                             use_container_width=True)
-            if enviado:
-                if not tipo_n:
-                    st.error("El tipo es obligatorio.")
-                else:
-                    insertar_equipo(aula_id,
-                        (tipo_n, marca_n, modelo_n, num_serie_n,
-                         estado_n, fecha_n, notas_n))
-                    st.success(f"Equipo '{tipo_n}' añadido a {aula_nombre}")
-                    st.rerun()
+                enviado = st.form_submit_button("➕ Añadir equipo",
+                                                use_container_width=True)
+                if enviado:
+                    if not tipo_n:
+                        st.error("El tipo es obligatorio.")
+                    else:
+                        insertar_equipo(aula_id,
+                            (tipo_n, marca_n, modelo_n, num_serie_n,
+                             estado_n, fecha_n, notas_n))
+                        st.success(f"Equipo '{tipo_n}' añadido a {aula_nombre}")
+                        st.rerun()
 
     # ============ TAB 3: ESTADÍSTICAS ============
     with tab_stats:
