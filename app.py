@@ -33,6 +33,7 @@ def cargar_config_auth():
     # 1) Intentar leer de st.secrets (Streamlit Cloud)
     try:
         if "auth" in st.secrets:
+            # Convertimos el objeto de Streamlit a un diccionario de Python normal
             return st.secrets["auth"].to_dict()
     except Exception:
         pass
