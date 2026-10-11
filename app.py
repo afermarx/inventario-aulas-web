@@ -33,7 +33,6 @@ def cargar_config_auth():
     # 1) Intentar leer de st.secrets (Streamlit Cloud)
     try:
         if "auth" in st.secrets:
-            # Convertimos el objeto de Streamlit a un diccionario de Python normal
             return st.secrets["auth"].to_dict()
     except Exception:
         pass
@@ -50,6 +49,22 @@ def cargar_config_auth():
             "la configuración en formato TOML."
         )
         st.stop()
+
+
+def inicializar_autenticador():
+    config = cargar_config_auth()
+    authenticator = stauth.Authenticate(
+        config["credentials"],
+        config["cookie"]["name"],
+        config["cookie"]["key"],
+        config["cookie"]["expiry_days"],
+    )
+    return authenticator
+
+
+def es_admin():
+    roles = st.session_state.get("roles") or []
+    return "admin" in roles
 
 
 # ---------- BASE DE DATOS ----------
