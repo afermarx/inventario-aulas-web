@@ -1,5 +1,5 @@
 """
-Inventario de Aulas - Versión Web con login, roles y Supabase
+Inventario de Aulas - Versión Web con login, roles, Supabase y gestión de aulas
 """
 from datetime import datetime
 
@@ -74,16 +74,17 @@ def es_admin():
 # ---------- ACCESO A DATOS ----------
 @st.cache_data(ttl=30)
 def listar_aulas():
-    """Devuelve todas las aulas ordenadas por ubicación y nombre."""
     sb = get_supabase()
-    resp = sb.table("aulas").select("id, nombre, ubicacion").order(
-        "ubicacion").order("nombre").execute()
+    resp = (sb.table("aulas")
+              .select("id, nombre, ubicacion")
+              .order("ubicacion")
+              .order("nombre")
+              .execute())
     return pd.DataFrame(resp.data)
 
 
 @st.cache_data(ttl=30)
 def listar_equipos(aula_id):
-    """Devuelve los equipos de un aula."""
     sb = get_supabase()
     resp = (sb.table("equipos")
               .select("id, tipo, marca, modelo, num_serie, estado, "
@@ -96,7 +97,6 @@ def listar_equipos(aula_id):
 
 @st.cache_data(ttl=30)
 def estadisticas_globales():
-    """Estadísticas globales del inventario."""
     sb = get_supabase()
     aulas = sb.table("aulas").select("id", count="exact").execute()
     equipos = sb.table("equipos").select("id, estado, tipo").execute()
@@ -118,6 +118,7 @@ def estadisticas_globales():
     return total_aulas, total_equipos, por_estado, por_tipo
 
 
+# ----- EQUIPOS -----
 def insertar_equipo(aula_id, datos):
     sb = get_supabase()
     sb.table("equipos").insert({
@@ -151,6 +152,41 @@ def eliminar_equipo(equipo_id):
     sb = get_supabase()
     sb.table("equipos").delete().eq("id", equipo_id).execute()
     st.cache_data.clear()
+
+
+# ----- AULAS -----
+def insertar_aula(nombre, ubicacion):
+    sb = get_supabase()
+    sb.table("aulas").insert({
+        "nombre": nombre,
+        "ubicacion": ubicacion,
+    }).execute()
+    st.cache_data.clear()
+
+
+def actualizar_aula(aula_id, nombre, ubicacion):
+    sb = get_supabase()
+    sb.table("aulas").update({
+        "nombre": nombre,
+        "ubicacion": ubicacion,
+    }).eq("id", aula_id).execute()
+    st.cache_data.clear()
+
+
+def eliminar_aula(aula_id):
+    sb = get_supabase()
+    sb.table("aulas").delete().eq("id", aula_id).execute()
+    st.cache_data.clear()
+
+
+def contar_equipos_aula(aula_id):
+    """Cuenta cuántos equipos tiene un aula (para avisar antes de borrar)."""
+    sb = get_supabase()
+    resp = (sb.table("equipos")
+              .select("id", count="exact")
+              .eq("aula_id", aula_id)
+              .execute())
+    return resp.count or 0
 
 
 # ---------- INTERFAZ ----------
@@ -212,14 +248,16 @@ def main():
 
     # --- Pestañas según el rol ---
     if usuario_rol == "admin":
-        tab_inv, tab_add, tab_stats = st.tabs(
-            ["📋 Inventario del aula", "➕ Añadir equipo", "📊 Estadísticas"]
+        tab_inv, tab_add, tab_aulas, tab_stats = st.tabs(
+            ["📋 Inventario del aula", "➕ Añadir equipo",
+             "🏫 Gestionar aulas", "📊 Estadísticas"]
         )
     else:
         tab_inv, tab_stats = st.tabs(
             ["📋 Inventario del aula", "📊 Estadísticas"]
         )
         tab_add = None
+        tab_aulas = None
 
     # ============ TAB 1: INVENTARIO ============
     with tab_inv:
@@ -345,7 +383,114 @@ def main():
                         st.success(f"Equipo '{tipo_n}' añadido a {aula_nombre}")
                         st.rerun()
 
-    # ============ TAB 3: ESTADÍSTICAS ============
+    # ============ TAB 3: GESTIONAR AULAS (solo admin) ============
+    if tab_aulas is not None:
+        with tab_aulas:
+            st.subheader("🏫 Gestión de aulas")
+            st.caption("Aquí puedes añadir, editar o eliminar aulas del inventario.")
+
+            # -------- Subsección 1: Añadir aula nueva --------
+            with st.expander("➕ Añadir aula nueva", expanded=False):
+                with st.form("form_nueva_aula", clear_on_submit=True):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        nombre_n = st.text_input("Nombre del aula *",
+                                                 placeholder="Ej: Aula 1.16")
+                    with col2:
+                        ubic_n = st.text_input("Ubicación (planta o zona)",
+                                               placeholder="Ej: Planta 1")
+
+                    creado = st.form_submit_button("➕ Añadir aula",
+                                                   use_container_width=True)
+                    if creado:
+                        if not nombre_n.strip():
+                            st.error("El nombre del aula es obligatorio.")
+                        else:
+                            aulas_actuales = listar_aulas()
+                            if nombre_n.strip() in aulas_actuales["nombre"].values:
+                                st.error(f"Ya existe un aula con el nombre "
+                                         f"'{nombre_n.strip()}'.")
+                            else:
+                                insertar_aula(nombre_n.strip(),
+                                              ubic_n.strip())
+                                st.success(f"Aula '{nombre_n.strip()}' "
+                                           f"creada correctamente.")
+                                st.rerun()
+
+            st.divider()
+
+            # -------- Subsección 2: Editar aula existente --------
+            st.markdown("### ✏️ Editar aula existente")
+            aulas = listar_aulas()
+
+            if aulas.empty:
+                st.info("No hay aulas creadas todavía.")
+            else:
+                opciones_aula = {
+                    f"{r['nombre']}  ({r['ubicacion'] or 'sin planta'})": r
+                    for _, r in aulas.iterrows()
+                }
+                sel_aula_label = st.selectbox("Selecciona un aula:",
+                                              list(opciones_aula.keys()))
+                aula_obj = opciones_aula[sel_aula_label]
+
+                with st.form("form_editar_aula"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        nombre_e = st.text_input("Nombre",
+                                                 value=aula_obj["nombre"])
+                    with col2:
+                        ubic_e = st.text_input("Ubicación",
+                                               value=aula_obj["ubicacion"] or "")
+
+                    guardar_aula = st.form_submit_button(
+                        "💾 Guardar cambios",
+                        use_container_width=True)
+                    if guardar_aula:
+                        if not nombre_e.strip():
+                            st.error("El nombre del aula no puede estar vacío.")
+                        else:
+                            aulas_actuales = listar_aulas()
+                            duplicado = aulas_actuales[
+                                (aulas_actuales["nombre"] == nombre_e.strip()) &
+                                (aulas_actuales["id"] != aula_obj["id"])
+                            ]
+                            if not duplicado.empty:
+                                st.error("Ya existe otra aula con ese nombre.")
+                            else:
+                                actualizar_aula(aula_obj["id"],
+                                                nombre_e.strip(),
+                                                ubic_e.strip())
+                                st.success("Aula actualizada correctamente.")
+                                st.rerun()
+
+                st.divider()
+
+                # -------- Subsección 3: Eliminar aula --------
+                st.markdown("### 🗑️ Eliminar aula")
+                n_equipos = contar_equipos_aula(aula_obj["id"])
+
+                if n_equipos > 0:
+                    st.warning(
+                        f"⚠️ El aula **{aula_obj['nombre']}** contiene "
+                        f"**{n_equipos} equipos**. Si la eliminas, "
+                        f"**también se borrarán todos esos equipos**."
+                    )
+
+                confirmar = st.checkbox(
+                    f"Confirmo que quiero eliminar el aula "
+                    f"'{aula_obj['nombre']}' y todos sus equipos."
+                )
+
+                if st.button("🗑️ Eliminar aula",
+                             type="primary",
+                             disabled=not confirmar,
+                             use_container_width=True):
+                    eliminar_aula(aula_obj["id"])
+                    st.success(f"Aula '{aula_obj['nombre']}' eliminada.")
+                    st.rerun()
+
+    # ============ TAB 4: ESTADÍSTICAS ============
     with tab_stats:
         st.subheader("📊 Estadísticas globales")
         total_aulas, total_equipos, por_estado, por_tipo = estadisticas_globales()
