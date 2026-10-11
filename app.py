@@ -30,29 +30,25 @@ ESTADOS = ["Operativo", "Averiado", "En reparación", "Obsoleto", "Baja"]
 # ---------- LOGIN ----------
 def cargar_config_auth():
     """Carga la config desde secrets (nube) o desde auth.yaml (local)."""
+    # 1) Intentar leer de st.secrets (Streamlit Cloud)
     try:
         if "auth" in st.secrets:
-            return dict(st.secrets["auth"])
+            return st.secrets["auth"].to_dict()
     except Exception:
         pass
-    with open("auth.yaml", encoding="utf-8") as f:
-        return yaml.load(f, Loader=SafeLoader)
 
-
-def inicializar_autenticador():
-    config = cargar_config_auth()
-    authenticator = stauth.Authenticate(
-        config["credentials"],
-        config["cookie"]["name"],
-        config["cookie"]["key"],
-        config["cookie"]["expiry_days"],
-    )
-    return authenticator
-
-
-def es_admin():
-    roles = st.session_state.get("roles") or []
-    return "admin" in roles
+    # 2) Si no, leer del archivo local
+    try:
+        with open("auth.yaml", encoding="utf-8") as f:
+            return yaml.load(f, Loader=SafeLoader)
+    except FileNotFoundError:
+        st.error(
+            "❌ No se ha encontrado la configuración de usuarios.\n\n"
+            "**En local**: crea `auth.yaml` en la carpeta del proyecto.\n\n"
+            "**En Streamlit Cloud**: ve a *Settings → Secrets* y pega "
+            "la configuración en formato TOML."
+        )
+        st.stop()
 
 
 # ---------- BASE DE DATOS ----------
